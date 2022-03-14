@@ -1,0 +1,253 @@
+---
+title: "CSC 578B Assignment 1"
+author: "Derek Robinson"
+date: 'Date: `r Sys.time()`'
+output:
+  html_document:
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+editor_options:
+  chunk_output_type: console
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+knitr::opts_chunk$set(cache = TRUE)
+
+library(rethinking) # the sw for model specification (it then uses cmdstan)
+library(foreign) # need to load funky data format
+library(here) # make sure working dir is the same all the time
+library(dplyr)
+library(dagitty)
+library(ggdag)
+here()
+set.seed(100)
+options(mc.cores = parallel::detectCores())
+```
+
+First we load our dataset and clean it up a little
+
+```{r}
+#load the data
+df <- read.csv('data.csv')
+# Clean up an entry which had "0T" instead of "OT"
+df["technique"][df["technique"] == "0T"] <- "OT"
+# convert category and technique (factor) to numeric
+df$category <- as.factor(df$category)
+df$technique <- as.factor(df$technique)
+# Take a peak at the data
+head(df)
+```
+## Step 1: Data Description and Descriptive Statistics
+
+In the following table are the descriptions of each column in the dataset:
+```{r table2, echo=FALSE, message=FALSE, warnings=FALSE, results='asis'}
+tabl <- "
+| Column Name      | Description                                                                     
+| ---------------- | -----------
+| Subject          | A unique indentifier for each subject (participant) of the study                
+| Category         | Describes if the subject was more experience (ME) or less experienced (LE)      
+| Technique        | Which technique was being used, either new technique (NT) or old technique (OT) 
+| tp (True Positives)         | The number of faults classified as true faults found by the subject                                                          
+"
+cat(tabl)
+```
+
+The most basic descriptive statistics are the mean and the variance. We will calculate both the mean and the variance of the true positives (`tp`).
+
+The mean of the true positives is equal to `r mean(df$tp)` and the variance of the true positives is equal to `r var(df$tp)`.
+
+## Step 2: A Defense of the likelihoods
+
+First we have to decide on a likelihood for `tp`. Since `tp` takes on positive natural numbers ($\mathbb{N}^+$), we will use the $\mathsf{Poisson}(\lambda)$ distribution as this is a commonly used likelihood for this kind of data.
+
+We will create a series of models $\mathbf{M}=\{\mathcal{M}_0,\ldots,\mathcal{M}_n\}$ and see how well the compare. After we have compared them we will choose our final model.
+
+Before we start creating models we need to choose our prior for the lambda parameter of the poisson function.
+We already know the mean and variance of `tp`, so lets use those to choose a prior.
+We can guess that the tp should probably be below 10 most of time.
+First we will take a look at the default prior $\mathsf{Normal}(0,10)$.
+
+```{r}
+max(rlnorm(70, 0, 10))
+```
+
+That seems a little high, lets try $\mathsf{Normal}(1, 1)$
+
+```{r}
+max(rlnorm(70, 1, 1))alist
+```
+
+That looks pretty good.
+Lets now make our first model which contains no predictor variables.
+
+### Model 0
+```{r m0, message=FALSE, warning=FALSE, results='hide'}
+m0 <- ulam(
+  alist(
+    tp ~ poisson(lambda),
+    log(lambda) <- alpha, # log link
+    alpha ~ normal(0, 2.5)
+  ), data = df, cores = 2, chains = 4, cmdstan = TRUE, log_lik = TRUE, iter = 5e3
+)
+```
+
+and lets check the diagnostics for model 0
+
+```{r}
+precis(m0)
+```
+
+Okay, so `n_eff` is in the thousands and $\widehat{R} < 1.01$, that's good. 
+
+Let's also have a look at the trankplots for model 0.
+
+```{r, fig.align='center'}
+trankplot(m0)
+```
+
+That's what we like to see, all the chains mixing well after the initial phase.
+
+Now lets create several more models, one with category as the predictor, another with technique as the predictor, and then finally using both category and technique as the predictor.
+
+### Model 1
+
+```{r m1, message=FALSE, warning=FALSE, results='hide'}
+m1 <- ulam(
+  alist(
+    tp ~ poisson(lambda),
+    log(lambda) <- alpha + beta_category[category], # log link
+    alpha ~ normal(0, 2.5),
+    beta_category[category] ~ normal(0, 1)
+  ), data = df, cores = 2, chains = 4, cmdstan = TRUE, log_lik = TRUE, iter = 5e3
+)
+```
+
+again, check the diagnositcs
+
+```{r}
+precis(m1, depth = 2)
+```
+
+Again, `n_eff` is in the thousands and $\widehat{R} < 1.01$
+
+### Model 2
+
+```{r m2, message=FALSE, warning=FALSE, results='hide'}
+m2 <- ulam(
+  alist(
+    tp ~ poisson(lambda),
+    log(lambda) <- alpha + beta_technique[technique], # log link
+    alpha ~ normal(0, 2.5),
+    beta_technique[technique] ~ normal(0, 1)
+  ), data = df, cores = 2, chains = 4, cmdstan = TRUE, log_lik = TRUE, iter = 5e3
+)
+```
+
+Again, check the diagnostics
+
+```{r}
+precis(m2, depth = 3)
+```
+
+Again, `n_eff` is in the thousands and $\widehat{R} < 1.01$
+
+### Model 3 (Final Model)
+
+```{r m3, message=FALSE, warning=FALSE, results='hide'}
+m3 <- ulam(
+  alist(
+    tp ~ poisson(lambda),
+    log(lambda) <- alpha + beta_category[category] + beta_technique[technique], # log link
+    alpha ~ normal(0, 2.5),
+    beta_category[category] ~ normal(0, 1),
+    beta_technique[technique] ~ normal(0, 1)
+  ), data = df, cores = 2, chains = 4, cmdstan = TRUE, log_lik = TRUE, iter = 5e3
+)
+```
+
+For the final time, lets check the diagnostics
+
+```{r}
+precis(m3, depth = 4)
+```
+
+Perfect, we have `n_eff` in the thousands and $\widehat{R} < 1.01$.
+
+## Step 3: A Discussion of the Priors
+
+First off, let us start by performing a prior predictive check of our final model, model 3
+
+```{r}
+postcheck(m3, window = 70)
+```
+
+So it seems that our model is not perfect, but we don't want it to be anyways as this would cause over fitting. It seems like model 3 is reasonable and that our priors are also reasonable. Lets us see what happens when we change them to the default prior of $\mathsf{Normal}(0,10)$.
+
+```{r m3_changed, message=FALSE, warning=FALSE, results='hide'}
+m3_changed <- ulam(
+  alist(
+    tp ~ poisson(lambda),
+    log(lambda) <- alpha + beta_category[category] + beta_technique[technique], # log link
+    alpha ~ normal(0, 10),
+    beta_category[category] ~ normal(0, 10),
+    beta_technique[technique] ~ normal(0, 10)
+  ), data = df, cores = 2, chains = 4, cmdstan = TRUE, log_lik = TRUE, iter = 5e3
+)
+```
+
+Let's check the diagnostics now that we have changed the priors.
+
+```{r}
+precis(m3_changed, depth = 4)
+```
+
+Seems like the default prior of $\mathsf{Normal}(0,10)$. would also work.
+
+## Step 4: Comparing the models using `LOO`
+
+Lets compare our models now
+
+```{r}
+(loo_est <- compare(m0, m1, m2, m3, func=LOO))
+```
+
+Interestingly, m2 is considered the best model.
+
+```{r}
+loo_est[2,3] + c(-1,1) * loo_est[2,4] * 1.96
+```
+
+This shows that model 3 crosses zero, which indicates that there is a zero effect from the adding in `category` as a predictor.
+
+## Step 5: Interpret Results
+
+Based on the usage of the `compare()` function we select model 2 as our final model. The results of the `compare()` function indicate that using `technique` as our sole predictor (model 2) best explains our data. This suggests that `category` has little to no effect on the number of true positives `tp` found.
+
+## Step 6: Causal Model (DAG)
+
+Below is the causal model used to model our assumptions
+```{r}
+dag <- dagitty("dag{category -> tp <- technique}")
+ggdag(dag, layout = "circle", text_col = "red")
+```
+
+## Step 7: Presentation of diagnostics from running Stan on the ‘final’ model
+
+### Plots
+
+TODO
+
+### R hat and Sample Size
+
+```{r}
+precis(m2, depth = 2)
+```
+
+```{r}
+plot(precis(m2, depth = 2, par = "beta_technique", prob = 0.95))
+```
+
